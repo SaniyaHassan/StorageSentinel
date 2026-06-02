@@ -1,0 +1,70 @@
+# StorageSentinel Configuration
+
+# Root directory to scan (defaults to /home, can be overridden for testing)
+scan_root: "/home"
+
+# Storage alerting thresholds (in % of total disk capacity)
+alert_thresholds:
+  warning: 80.0
+  critical: 90.0
+  emergency: 95.0
+
+# Threshold to flag large files (in Gigabytes)
+large_file_threshold_gb: 5.0
+
+# Threshold to consider a directory "cold/inactive" (in days)
+# If no files have been modified or accessed inside the folder in this period,
+# it will be flagged as a candidate for zstd archival.
+cold_data_days: 180
+
+# Policies for automatic cleanup (when disk usage exceeds warning threshold)
+auto_cleanup:
+  # Delete files in user Trashes older than these many days
+  trash_max_age_days: 30
+  
+  # Clean package manager caches
+  clean_conda_cache: true
+  clean_pip_cache: true
+  
+  # Vacuum journald system logs
+  clean_journald_logs: true
+  journald_max_age_days: 30
+
+# Directories and files to completely ignore during scanning
+exclusions:
+  - "/proc"
+  - "/sys"
+  - "/dev"
+  - "/run"
+  - "/var/lib/docker"
+  - "lost+found"
+  - ".git"
+  - "node_modules"
+  - ".venv"
+  - "venv"
+  - "miniconda3" # ignore miniconda's internal packages folder from being parsed as cold research data
+  - "miniconda"
+  - "anaconda3"
+
+# User quota settings
+# Map specific users to their classes
+user_classes:
+  sines: faculty
+  alavia: phd
+  student: student
+
+# Space quota values in Gigabytes (GB)
+quotas:
+  default: 150.0
+  faculty: 500.0
+  phd: 300.0
+  student: 150.0
+
+# SMTP email alerts configuration
+email_alerts:
+  enabled: true
+  smtp_server: "localhost"
+  smtp_port: 25
+  from_address: "sentinel@yourdomain.com"
+  to_addresses:
+    - "admin@yourdomain.com"
