@@ -106,14 +106,18 @@ class FileSystemScanner:
         videos = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.webm', '.mpeg', '.mpg'}
         isos = {'.iso', '.img', '.dmg'}
         models = {'.bin', '.pt', '.pth', '.ckpt', '.safetensors', '.onnx', '.gguf', '.h5', '.model', '.weights'}
-        datasets = {'.csv', '.tsv', '.json', '.parquet', '.hdf5', '.npz', '.npy', '.xml', '.db', '.sqlite', '.sqlite3'}
-        
+        # Live databases are NOT disposable datasets - keep them in their own category.
+        databases = {'.db', '.sqlite', '.sqlite3'}
+        datasets = {'.csv', '.tsv', '.json', '.parquet', '.hdf5', '.npz', '.npy', '.xml'}
+
         if ext in videos:
             return "Videos"
         elif ext in isos:
             return "ISOs"
         elif ext in models:
             return "AI Models"
+        elif ext in databases:
+            return "Databases"
         elif ext in datasets:
             return "Datasets"
         else:
@@ -338,7 +342,7 @@ class FileSystemScanner:
                 caches["pip"].append({"path": path, "size_gb": round(size_bytes / (1024**3), 3)})
                 
         # File type summary in GB
-        categories = ["Videos", "ISOs", "AI Models", "Datasets", "Caches", "Trash", "Other"]
+        categories = ["Videos", "ISOs", "AI Models", "Databases", "Datasets", "Caches", "Trash", "Other"]
         file_type_gb = {cat: 0.0 for cat in categories}
         for category, size_bytes in self.file_type_sizes.items():
             file_type_gb[category] = round(size_bytes / (1024**3), 3)
