@@ -45,21 +45,22 @@ def sync_actions_to_db(db_path, actions):
         row = cursor.fetchone()
         
         approved_int = 1 if item["approved"] else 0
+        risk_val = item.get("risk", "Medium")
         
         if row:
             # Sync approved flag if not already executed
             if row["executed"] == 0:
                 cursor.execute("""
                 UPDATE pending_actions 
-                SET approved = ?, size_gb = ?, description = ? 
+                SET approved = ?, size_gb = ?, description = ?, risk = ?
                 WHERE id = ?
-                """, (approved_int, item["size_gb"], item["description"], row["id"]))
+                """, (approved_int, item["size_gb"], item["description"], risk_val, row["id"]))
         else:
             # Insert new action
             cursor.execute("""
-            INSERT INTO pending_actions (action_type, target_path, size_gb, description, approved, executed)
-            VALUES (?, ?, ?, ?, ?, 0)
-            """, (item["action_type"], item["target_path"], item["size_gb"], item["description"], approved_int))
+            INSERT INTO pending_actions (action_type, target_path, size_gb, description, approved, executed, risk)
+            VALUES (?, ?, ?, ?, ?, 0, ?)
+            """, (item["action_type"], item["target_path"], item["size_gb"], item["description"], approved_int, risk_val))
     conn.commit()
     conn.close()
 
@@ -110,10 +111,10 @@ def interactive_approve(json_path, db_path):
     
     modified = False
     for item in actions:
-        # Show all pending actions or already approved actions
         status_str = "APPROVED" if item["approved"] else "PENDING"
         print(f"\nID: {item['id']}")
         print(f"Action: {item['action_type'].upper()}")
+        print(f"Risk:   {item.get('risk', 'Medium').upper()}")
         print(f"Target: {item['target_path']}")
         print(f"Space:  {item['size_gb']} GB")
         print(f"Reason: {item['description']}")
@@ -148,6 +149,73 @@ def interactive_approve(json_path, db_path):
         print("\nDecisions saved to file and synced to SQLite database.")
     else:
         print("\nNo changes made.")
+
+def send_email_alert(config, disk_usage, scan_summary, policy_results):
+    """Send SMTP email alert if storage thresholds are exceeded."""
+    email_cfg = config.get("email_alerts", {})
+    if not email_cfg.get("enabled", False):
+        return
+        
+    percent_used = disk_usage["percent_used"]
+    thresholds = config.get("alert_thresholds", {})
+    
+    severity = None
+    if percent_used >= thresholds.get("emergency", 95.0):
+        severity = "Emergency"
+    elif percent_used >= thresholds.get("critical", 90.0):
+        severity = "Critical"
+    elif percent_used >= thresholds.get("warning", 80.0):
+        severity = "Warning"
+        
+    if not severity:
+        return
+        
+    subject = f"Storage {severity} Alert: Disk Usage at {percent_used}%"
+    
+    # Top consumers with quota warning
+    user_classes = config.get("user_classes", {})
+    quota_limits = config.get("quotas", {})
+    default_quota = quota_limits.get("default", 150.0)
+    
+    top_consumers = []
+    for user, size_gb in sorted(scan_summary["user_metrics"], key=lambda x: x[1], reverse=True)[:5]:
+        user_class = user_classes.get(user, "student")
+        quota_gb = quota_limits.get(user_class, default_quota)
+        status_suffix = " (Exceeded)" if size_gb > quota_gb else ""
+        top_consumers.append(f"  {user:<15} {size_gb:<10.1f} GB{status_suffix}")
+        
+    top_consumers_str = "\n".join(top_consumers)
+    
+    # Calculate potential recovery
+    auto_actions = policy_results.get("auto_actions", [])
+    manual_actions = policy_results.get("manual_actions", [])
+    total_recovery = sum(a["size_gb"] for a in auto_actions) + sum(m["size_gb"] for m in manual_actions)
+    
+    body = (
+        f"StorageSentinel Alert\n"
+        f"=====================\n\n"
+        f"Disk Usage: {disk_usage['used_size_gb']} GB / {disk_usage['total_size_gb']} GB ({percent_used}%)\n"
+        f"Status:     {severity}\n\n"
+        f"Top Consumers:\n"
+        f"{top_consumers_str}\n\n"
+        f"Potential Recovery: {total_recovery:.1f} GB\n\n"
+        f"Please run 'sentinel.sh approve' to review and execute cleanup actions."
+    )
+    
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = email_cfg.get("from_address", "sentinel@yourdomain.com")
+        msg["To"] = ", ".join(email_cfg.get("to_addresses", []))
+        
+        server = smtplib.SMTP(email_cfg.get("smtp_server", "localhost"), email_cfg.get("smtp_port", 25), timeout=10)
+        server.sendmail(msg["From"], email_cfg.get("to_addresses", []), msg.as_string())
+        server.quit()
+        print(f"Email alert sent successfully to {msg['To']}.")
+    except Exception as e:
+        print(f"Warning: Failed to send email alert: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="StorageSentinel: Storage Lifecycle Management System")
@@ -200,6 +268,11 @@ def main():
         duplicates = s.scan()
         summary = s.get_summary()
         
+        # Apply policies
+        pe = policy_engine.PolicyEngine(config)
+        policies = pe.evaluate(summary, disk_usage)
+        policies["duplicates"] = duplicates
+        
         # Save scan data to database
         try:
             database.record_scan(
@@ -207,24 +280,22 @@ def main():
                 system_metrics=disk_usage,
                 user_metrics=summary["user_metrics"],
                 directory_metrics=summary["directory_metrics"],
-                large_files_metrics=summary["large_files_metrics"]
+                large_files_metrics=summary["large_files_metrics"],
+                file_type_metrics=summary.get("file_type_gb")
             )
         except Exception as e:
             print(f"Warning: Failed to log metrics to SQLite DB: {e}")
             
-        # Apply policies
-        pe = policy_engine.PolicyEngine(config)
-        policies = pe.evaluate(summary, disk_usage)
-        # Add duplicate list to policies
-        policies["duplicates"] = duplicates
-        
         # Report & Save to JSON
         rep = reporter.ActionReporter(args.json)
-        rep.generate_report(disk_usage, summary, policies, duplicates)
+        rep.generate_report(disk_usage, summary, policies, duplicates, config)
         
         # Sync newly identified actions to database
         actions = rep.load_actions_from_json()
         sync_actions_to_db(args.db, actions)
+        
+        # Dispatch SMTP alerts if warning threshold exceeded
+        send_email_alert(config, disk_usage, summary, policies)
         
     elif args.command == "approve":
         # Pull approvals from database first to sync in case admin deleted or modified elsewhere
@@ -235,20 +306,32 @@ def main():
         rep = reporter.ActionReporter(args.json)
         actions = rep.load_actions_from_json()
         
-        if not actions:
-            print(f"No pending actions found in {args.json}. Run 'scan' first.")
-            sys.exit(0)
-            
         actions_to_run = []
         for a in actions:
-            # If auto-only flag, we skip manual recommendations and compressions
-            if args.auto_only and a["action_type"] in ["compress", "delete"]:
+            # If auto-only flag, we skip manual recommendations, cache purges and compressions
+            if args.auto_only and a["action_type"] in ["compress", "delete", "conda_clean", "pip_clean"]:
                 continue
                 
             # Must be approved or safe auto
             if a["approved"]:
                 actions_to_run.append(a)
                 
+        # Also query database for any approved, unexecuted delayed_delete actions
+        try:
+            db_actions = database.get_pending_actions(args.db)
+            for da in db_actions:
+                if da["action_type"] == "delayed_delete":
+                    actions_to_run.append({
+                        "id": da["id"],
+                        "action_type": "delayed_delete",
+                        "target_path": da["target_path"],
+                        "size_gb": da["size_gb"],
+                        "description": da.get("description", "Delayed delete"),
+                        "approved": True
+                    })
+        except Exception as e:
+            print(f"Warning: Could not fetch delayed delete actions from database: {e}")
+            
         if not actions_to_run:
             print("No actions are approved for execution.")
             sys.exit(0)

@@ -1,9 +1,13 @@
 import os
 import shutil
 import hashlib
-import pwd
 from collections import defaultdict
 from datetime import datetime
+
+try:
+    import pwd
+except ImportError:
+    pwd = None
 
 def get_disk_usage(path):
     """Get disk usage metrics for the filesystem containing the path."""
@@ -18,14 +22,16 @@ def get_disk_usage(path):
 
 def get_file_owner(uid):
     """Retrieve username from UID, fallback to UID string on error."""
-    try:
-        return pwd.getpwuid(uid).pw_name
-    except Exception:
-        return str(uid)
+    if pwd is not None:
+        try:
+            return pwd.getpwuid(uid).pw_name
+        except Exception:
+            pass
+    return str(uid)
 
-def calculate_md5_partial(file_path, bytes_to_read=1024*1024):
-    """Compute MD5 hash of the first chunk of the file for fast initial matching."""
-    hasher = hashlib.md5()
+def calculate_sha256_partial(file_path, bytes_to_read=1024*1024):
+    """Compute SHA256 hash of the first chunk of the file for fast initial matching."""
+    hasher = hashlib.sha256()
     try:
         with open(file_path, 'rb') as f:
             chunk = f.read(bytes_to_read)
@@ -34,9 +40,9 @@ def calculate_md5_partial(file_path, bytes_to_read=1024*1024):
     except Exception:
         return None
 
-def calculate_md5_full(file_path):
-    """Compute full MD5 hash of a file."""
-    hasher = hashlib.md5()
+def calculate_sha256_full(file_path):
+    """Compute full SHA256 hash of a file."""
+    hasher = hashlib.sha256()
     try:
         with open(file_path, 'rb') as f:
             for chunk in iter(lambda: f.read(65536), b''):
@@ -59,13 +65,14 @@ class FileSystemScanner:
         # Scanner results
         self.user_sizes = defaultdict(int) # username -> bytes
         self.dir_sizes = defaultdict(int)  # directory_path -> bytes
-        self.dir_mtimes = {}               # directory_path -> latest mtime
+        self.dir_mtimes = {}               # directory_path -> latest activity time (max of mtime and atime)
         self.large_files = []              # list of dicts
         self.size_groups = defaultdict(list) # file_size -> list of file paths (for duplicate detection, size >= 50MB)
         self.trash_paths = []              # paths to Trash directories
         self.conda_paths = []              # paths to conda pkgs cache directories
         self.pip_paths = []                # paths to pip cache directories
         self.duplicates = []               # list of duplicate group dicts
+        self.file_type_sizes = defaultdict(int) # file category -> bytes
         
     def is_excluded(self, path):
         """Check if path or its basename is in exclusions."""
@@ -82,6 +89,35 @@ class FileSystemScanner:
                 if base_name == excl:
                     return True
         return False
+
+    def _categorize_file(self, file_path, file_size):
+        """Categorize file size into specific analytics buckets."""
+        abs_path = file_path.lower()
+        
+        # Check path first (highest priority)
+        if "trash" in abs_path or ".local/share/trash" in abs_path:
+            return "Trash"
+        if "cache" in abs_path or "pkgs" in abs_path or "pip" in abs_path:
+            return "Caches"
+            
+        # Check extensions
+        _, ext = os.path.splitext(abs_path)
+        
+        videos = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.webm', '.mpeg', '.mpg'}
+        isos = {'.iso', '.img', '.dmg'}
+        models = {'.bin', '.pt', '.pth', '.ckpt', '.safetensors', '.onnx', '.gguf', '.h5', '.model', '.weights'}
+        datasets = {'.csv', '.tsv', '.json', '.parquet', '.hdf5', '.npz', '.npy', '.xml', '.db', '.sqlite', '.sqlite3'}
+        
+        if ext in videos:
+            return "Videos"
+        elif ext in isos:
+            return "ISOs"
+        elif ext in models:
+            return "AI Models"
+        elif ext in datasets:
+            return "Datasets"
+        else:
+            return "Other"
 
     def scan(self):
         """Perform the recursive file system scan."""
@@ -101,7 +137,7 @@ class FileSystemScanner:
             return 0
             
         total_size = 0
-        latest_mtime = 0
+        latest_active = 0
         
         try:
             with os.scandir(dir_path) as entries:
@@ -118,8 +154,14 @@ class FileSystemScanner:
                             
                             # Track latest mtime/atime for the directory
                             mtime = stat_res.st_mtime
-                            if mtime > latest_mtime:
-                                latest_mtime = mtime
+                            atime = stat_res.st_atime
+                            activity_time = max(mtime, atime)
+                            if activity_time > latest_active:
+                                latest_active = activity_time
+                                
+                            # Categorize file type
+                            category = self._categorize_file(entry.path, file_size)
+                            self.file_type_sizes[category] += file_size
                                 
                             # Track large files
                             if file_size >= self.large_file_threshold:
@@ -156,6 +198,11 @@ class FileSystemScanner:
                             sub_size = self._scan_directory(path)
                             total_size += sub_size
                             
+                            # Propagate latest activity time from subdirectory
+                            sub_mtime = self.dir_mtimes.get(path, 0)
+                            if sub_mtime > latest_active:
+                                latest_active = sub_mtime
+                            
                     except PermissionError:
                         # Silently skip individual files/folders we don't have access to
                         continue
@@ -172,8 +219,8 @@ class FileSystemScanner:
             
         # Record directory size and mtime
         self.dir_sizes[dir_path] = total_size
-        if latest_mtime > 0:
-            self.dir_mtimes[dir_path] = latest_mtime
+        if latest_active > 0:
+            self.dir_mtimes[dir_path] = latest_active
             
         # Map user usage if we are scanning user home directories
         # E.g. if root is /home, then immediate children of /home are users
@@ -185,36 +232,47 @@ class FileSystemScanner:
         return total_size
 
     def _find_duplicates(self):
-        """Find duplicate files based on size and MD5 hashing."""
+        """Find duplicate files based on size and SHA256 hashing."""
         duplicates_found = []
         
         for size, file_paths in self.size_groups.items():
             if len(file_paths) < 2:
                 continue
                 
-            # Step 1: Compute partial MD5 (first 1MB) to group potential duplicates
+            # Step 1: Compute partial SHA256 (first 1MB) to group potential duplicates
             partial_groups = defaultdict(list)
             for path in file_paths:
-                p_hash = calculate_md5_partial(path)
+                p_hash = calculate_sha256_partial(path)
                 if p_hash:
                     partial_groups[p_hash].append(path)
                     
-            # Step 2: For groups that still have >= 2 items, check full MD5 hash
+            # Step 2: For groups that still have >= 2 items, check full SHA256 hash
             for p_hash, candidate_paths in partial_groups.items():
                 if len(candidate_paths) < 2:
                     continue
                     
                 full_groups = defaultdict(list)
                 for path in candidate_paths:
-                    f_hash = calculate_md5_full(path)
+                    f_hash = calculate_sha256_full(path)
                     if f_hash:
                         full_groups[f_hash].append(path)
                         
                 for f_hash, dup_paths in full_groups.items():
                     if len(dup_paths) >= 2:
+                        # Map owners of duplicate files
+                        owners = []
+                        for p in dup_paths:
+                            try:
+                                stat_res = os.stat(p)
+                                owner = get_file_owner(stat_res.st_uid)
+                            except Exception:
+                                owner = "unknown"
+                            owners.append(owner)
+                            
                         duplicates_found.append({
                             "size_gb": round(size / (1024**3), 3),
-                            "paths": dup_paths
+                            "paths": dup_paths,
+                            "owners": owners
                         })
                         
         return duplicates_found
@@ -240,7 +298,7 @@ class FileSystemScanner:
         for lf in self.large_files:
             large_files_metrics.append((lf['path'], lf['size_gb'], lf['owner'], lf['last_accessed']))
             
-        # Identify cold directories: directories with size > min_dir_size_gb and mtime older than cold_data_days
+        # Identify cold directories: directories with size > min_dir_size_gb and mtime/activity older than cold_data_days
         cold_directories = []
         for path, size_bytes in self.dir_sizes.items():
             if size_bytes >= min_dir_size_bytes:
@@ -278,6 +336,12 @@ class FileSystemScanner:
             size_bytes = self.dir_sizes.get(path, 0)
             if size_bytes > 0:
                 caches["pip"].append({"path": path, "size_gb": round(size_bytes / (1024**3), 3)})
+                
+        # File type summary in GB
+        categories = ["Videos", "ISOs", "AI Models", "Datasets", "Caches", "Trash", "Other"]
+        file_type_gb = {cat: 0.0 for cat in categories}
+        for category, size_bytes in self.file_type_sizes.items():
+            file_type_gb[category] = round(size_bytes / (1024**3), 3)
 
         return {
             "user_metrics": user_metrics,
@@ -285,5 +349,6 @@ class FileSystemScanner:
             "large_files_metrics": large_files_metrics,
             "cold_directories": cold_directories,
             "caches": caches,
-            "duplicates": self.duplicates
+            "duplicates": self.duplicates,
+            "file_type_gb": file_type_gb
         }

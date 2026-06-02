@@ -1,33 +1,48 @@
 # StorageSentinel - Storage Lifecycle Manager
 
-StorageSentinel is a policy-driven, automated server storage manager designed for research and AI servers. It monitors utilization trends, tracks user growth, and executes automated or administrator-approved cleanup policies to safely resolve disk space issues.
+StorageSentinel is a policy-driven, automated server storage manager designed for research and AI servers. It monitors utilization trends, tracks user growth and quotas, performs file type analytics, and executes automated or administrator-approved cleanup policies to safely resolve disk space issues.
 
 ## System Architecture
 
 ```mermaid
 graph TD
-    Scanner[scanner.py] -->|Filesystem crawling & deduplication| Sentinel[sentinel.py CLI Engine]
-    Config[config.yaml] -->|Alert thresholds & policies| Policy[policy_engine.py]
-    Policy -->|Auto & manual buckets| Sentinel
-    Sentinel -->|Log snapshots & audits| DB[(sentinel.db SQLite)]
-    Sentinel -->|Recommendation state| JSON[pending_actions.json]
+    Scanner[scanner.py] -->|Filesystem crawling & SHA256| Sentinel[sentinel.py CLI Engine]
+    Config[config.yaml] -->|Alert thresholds, quotas, & policies| Policy[policy_engine.py]
+    Policy -->|Auto, manual, & risk scoring| Sentinel
+    Sentinel -->|Log snapshots, file-type trends, & delayed deletes| DB[(sentinel.db SQLite)]
+    Sentinel -->|Recommendation state & risk score| JSON[pending_actions.json]
+    Sentinel -->|SMTP Alerts| SMTP[Email System]
     Admin[Administrator CLI/cron] -->|Interactive Approval| Sentinel
     Sentinel -->|Approved targets| Executor[executor.py]
-    Executor -->|Compression & purges| Filesystemystem[Filesystem]
+    Executor -->|Delayed compression cleanups & user cache purges| Filesystem[Filesystem]
 ```
+
+## Production Safety Safeguards
+
+StorageSentinel is built around the philosophy of **Observe → Analyze → Recommend → Approve → Execute**. It includes strict safeguards to prevent server disruption:
+
+1. **SHA256 Content Matching**: File deduplication uses secure SHA256 checksums (partial first 1MB, then full file hash) to prevent hash collisions.
+2. **Strictly Manual Deduplication & Cache Purges**: Duplicate file removal and Python user cache purges (Conda / Pip) are never executed automatically. They require explicit administrator approval in the recommendation queue.
+3. **User-Specific Cache Purges**: Conda cache purges are separated by cache directory, and on Unix environments they are executed under the respective user's permissions (`sudo -u <username>`) rather than globally as root.
+4. **Delayed Compression Deletion (7-Day Safety Valve)**: When a directory compression action is approved and executed:
+   - The directory is compressed to a `.tar.zst` archive.
+   - Archive integrity is verified by simulating decompression.
+   - If verified, the original directory is renamed to `.deletable.YYYY-MM-DD` and registered as a pre-approved `delayed_delete` action.
+   - The original files are kept for 7 days before being automatically purged during a subsequent `clean` run.
+5. **System Directory Exclusions**: Critical system directories (e.g. `/var/lib/postgresql`, `/var/lib/mysql`) are given a **Critical** risk score and excluded from any automatic cleanups.
 
 ## System Requirements
 
-- **Operating System**: Linux (CentOS/Ubuntu/Debian)
+- **Operating System**: Linux (CentOS/Ubuntu/Debian) or Windows (for development/testing)
 - **Python**: Python 3.8+ (requires `PyYAML` library)
-- **Utilities**: `tar` and `zstd` (for high-performance compression)
+- **Utilities**: `tar` and `zstd` (for high-performance compression on Linux)
 - **Permissions**:
   - Scanning user home directories requires read access to `/home`.
   - Running system journal cleanups or reading other user directories requires administrative privileges (`sudo`).
 
 ## Installation
 
-1. Clone or copy the `Storage_manager` folder to your target server:
+1. Clone or copy the `StorageSentinel` folder to your target server:
    ```bash
    cd /home/saniya/Downloads/Storage_manager
    ```
@@ -53,7 +68,7 @@ graph TD
 
 ## Configuration (`config.yaml`)
 
-Edit the `config.yaml` file to define paths, alert levels, and cleanup policies:
+Edit the `config.yaml` file to define paths, alert levels, user quotas, and email settings:
 
 ```yaml
 # Directory to scan
@@ -68,13 +83,13 @@ alert_thresholds:
 # Scanner thresholds
 large_file_threshold_gb: 5.0  # Log individual files larger than 5GB
 min_dir_size_gb: 1.0          # Log directories larger than 1GB for historical analysis
-cold_data_days: 180           # Days since modification to consider directory "cold"
+cold_data_days: 180           # Days since modification/access to consider directory "cold"
 
-# Auto-cleanup rules
+# Auto-cleanup rules (only for low-risk actions)
 auto_cleanup:
   trash_max_age_days: 30       # Empty user trash files older than 30 days
-  clean_conda_cache: true      # Run 'conda clean --all' if warning threshold hit
-  clean_pip_cache: true        # Run 'pip cache purge' if warning threshold hit
+  clean_conda_cache: true      # Flag conda cache for manual recommendations
+  clean_pip_cache: true        # Flag pip cache for manual recommendations
   clean_journald_logs: true    # Vacuum journald logs older than 30 days
   journald_max_age_days: 30
 
@@ -87,6 +102,29 @@ exclusions:
   - "node_modules"
   - "venv"
   - ".venv"
+
+# User quota settings
+# Map specific users to their classes
+user_classes:
+  sines: faculty
+  alavia: phd
+  student: student
+
+# Space quota values in Gigabytes (GB)
+quotas:
+  default: 150.0
+  faculty: 500.0
+  phd: 300.0
+  student: 150.0
+
+# SMTP email alerts configuration
+email_alerts:
+  enabled: true
+  smtp_server: "localhost"
+  smtp_port: 25
+  from_address: "sentinel@yourdomain.com"
+  to_addresses:
+    - "admin@yourdomain.com"
 ```
 
 ---
@@ -96,7 +134,7 @@ exclusions:
 StorageSentinel is managed using `sentinel.sh`.
 
 ### 1. Perform File System Scan
-Recursively scans the filesystem root, calculates user distribution, groups duplicates, identifies cold directories, logs data to SQLite database, and prints a summary report:
+Recursively scans the filesystem root, calculates user distribution, checks quotas, classifies file types, groups duplicates, identifies cold directories, logs data to SQLite database, sends SMTP warning email if threshold exceeded, and prints a summary report:
 ```bash
 ./sentinel.sh scan
 ```
@@ -115,34 +153,41 @@ Administrators can navigate findings interactively:
 - `q`: Save decisions and exit.
 
 ### 3. Execute Cleanups
-Runs the cleanup commands for approved recommendations:
+Runs the cleanup commands for approved recommendations and automatically purges 7-day-old compressed originals:
 ```bash
 ./sentinel.sh clean
 ```
 - **Dry-Run (Simulation)**: `./sentinel.sh clean --dry-run` (prints proposed actions without mutating files)
-- **Auto-Only**: `./sentinel.sh clean --auto-only` (runs safe automated cache/trash purges, bypassing manual approvals)
+- **Auto-Only**: `./sentinel.sh clean --auto-only` (runs safe automated cache/trash purges, bypassing manual approvals and delayed deletes)
 
 ### 4. History and Trend Analysis
-Displays historical storage snapshot log and growth analytics (compares latest two scans to show directory and user usage growth rates):
+Displays historical storage snapshot log and growth analytics:
 ```bash
 ./sentinel.sh history
 ```
 
 ---
 
-## Safety Features
+## Report Sections
 
-- **Double-Stage Compression Verification**: Before deleting any cold directory, `executor.py` compresses it to `.tar.zst` and runs `zstd -d -c | tar -tf` to verify archive integrity. If verification fails, the original directory is preserved.
-- **Deduplication Safeguards**: Grouping duplicates requires matching file sizes followed by partial (first 1MB) and full content MD5 hashing. The original is explicitly kept; only duplicate paths are removed.
-- **Trash Preservation**: Preserves the structural desktop wrapper folders (`files` and `info` inside user Trash), deleting only the actual discarded files inside them.
+1. **Filesystem Utilization**: Total, used, available, and percentage disk usage with alert statuses.
+2. **User Storage & Quotas**: Displays user disk usage compared to quota limits and status (`OK` or `Exceeded`).
+3. **File Type Analytics**: Aggregated size of file categories:
+   - **Videos**: Media files (`.mp4`, `.mkv`, etc.)
+   - **ISOs**: System disk images (`.iso`, `.img`, etc.)
+   - **AI Models**: Neural weights and model definitions (`.bin`, `.pt`, `.safetensors`, `.gguf`, etc.)
+   - **Datasets**: Data structures (`.csv`, `.json`, `.parquet`, `.db`, etc.)
+   - **Caches**: Package manager and general cache systems.
+   - **Trash**: Discarded user files.
+   - **Other**: Remaining files.
+4. **Large Files (>5 GB)**: Details on massive files, listing owners and last access dates.
+5. **Duplicate File Summary**: Lists duplicate files with potential savings, detailing owners.
+6. **Recommended Cleanup Candidates**: Low-risk automatic and manual approval actions, labeled with Risk Scores (`Low`, `Medium`, `High`, `Critical`).
 
 ---
 
 ## Production Deployment (Automation)
 
-To automate server storage management, you can schedule scans and runs.
-
-### Option A: Cron Schedule (Recommended)
 Add a root cron job to perform scanning and automated cache cleanups daily, alerting administrators via logs.
 
 1. Open crontab:
@@ -152,46 +197,9 @@ Add a root cron job to perform scanning and automated cache cleanups daily, aler
 
 2. Add the following entries:
    ```cron
-   # Run scan daily at 2:00 AM, updating recommendations and system usage tables
+   # Run scan daily at 2:00 AM, updating database and sending email alerts
    0 2 * * * cd /home/saniya/Downloads/Storage_manager && ./sentinel.sh scan >> /var/log/sentinel_scan.log 2>&1
 
-   # Execute safe auto-cleanups (e.g. caches) daily at 3:00 AM
+   # Execute safe auto-cleanups and due delayed deletions daily at 3:00 AM
    0 3 * * * cd /home/saniya/Downloads/Storage_manager && ./sentinel.sh clean --auto-only >> /var/log/sentinel_clean.log 2>&1
-   ```
-
-### Option B: Systemd Timers
-Create a systemd service to run scans automatically.
-
-1. Create service file `/etc/systemd/system/sentinel-scan.service`:
-   ```ini
-   [Unit]
-   Description=StorageSentinel filesystem scanner
-   After=network.target
-
-   [Service]
-   Type=oneshot
-   WorkingDirectory=/home/saniya/Downloads/Storage_manager
-   ExecStart=/usr/bin/python3 sentinel.py scan
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-2. Create timer file `/etc/systemd/system/sentinel-scan.timer`:
-   ```ini
-   [Unit]
-   Description=Run StorageSentinel scan daily
-
-   [Timer]
-   OnCalendar=daily
-   Persistent=true
-
-   [Install]
-   WantedBy=timers.target
-   ```
-
-3. Enable timer:
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now sentinel-scan.timer
    ```

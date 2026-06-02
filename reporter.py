@@ -5,7 +5,7 @@ class ActionReporter:
     def __init__(self, json_path="pending_actions.json"):
         self.json_path = json_path
         
-    def generate_report(self, disk_usage, scan_summary, policy_results, duplicates):
+    def generate_report(self, disk_usage, scan_summary, policy_results, duplicates, config=None):
         """Print a beautiful markdown terminal report."""
         print("\n" + "=" * 60)
         print("                 STORAGESENTINEL STATUS REPORT")
@@ -18,20 +18,43 @@ class ActionReporter:
         print(f"  Utilization: {disk_usage['percent_used']}%")
         
         # Alerts
-        if policy_results["alerts"]:
+        if policy_results.get("alerts"):
             print("\n  ALERT STATUS:")
             for alert in policy_results["alerts"]:
                 print(f"  [!] {alert}")
                 
-        # 2. User Storage
-        print("\n### 2. User Storage Distribution")
-        print(f"  {'User':<15} {'Usage (GB)':<12}")
-        print("  " + "-" * 28)
-        for user, size_gb in sorted(scan_summary["user_metrics"], key=lambda x: x[1], reverse=True):
-            print(f"  {user:<15} {size_gb:<12.3f}")
+        # 2. User Storage Distribution with Quotas
+        print("\n### 2. User Storage & Quotas")
+        print(f"  {'User':<15} {'Usage (GB)':<12} {'Quota (GB)':<12} {'Status':<12}")
+        print("  " + "-" * 55)
+        
+        user_classes = {}
+        quota_limits = {}
+        default_quota = 150.0
+        if config:
+            user_classes = config.get("user_classes", {})
+            quota_limits = config.get("quotas", {})
+            default_quota = quota_limits.get("default", 150.0)
             
-        # 3. Large files
-        print("\n### 3. Large Files (>5 GB)")
+        for user, size_gb in sorted(scan_summary["user_metrics"], key=lambda x: x[1], reverse=True):
+            user_class = user_classes.get(user, "student")
+            quota_gb = quota_limits.get(user_class, default_quota)
+            status = "Exceeded" if size_gb > quota_gb else "OK"
+            print(f"  {user:<15} {size_gb:<12.3f} {quota_gb:<12.1f} {status:<12}")
+            
+        # 3. File Type Analytics
+        print("\n### 3. File Type Analytics")
+        file_type_gb = scan_summary.get("file_type_gb", {})
+        if file_type_gb:
+            print(f"  {'Category':<15} {'Size (GB)':<12}")
+            print("  " + "-" * 28)
+            for cat, size_gb in sorted(file_type_gb.items(), key=lambda x: x[1], reverse=True):
+                print(f"  {cat:<15} {size_gb:<12.3f}")
+        else:
+            print("  No file type analytics available.")
+            
+        # 4. Large files
+        print("\n### 4. Large Files (>5 GB)")
         large_files = scan_summary["large_files_metrics"]
         if large_files:
             print(f"  {'Owner':<12} {'Size (GB)':<12} {'Path':<50}")
@@ -45,8 +68,8 @@ class ActionReporter:
         else:
             print("  No large files found.")
             
-        # 4. Duplicate Files Summary
-        print("\n### 4. Duplicate File Summary")
+        # 5. Duplicate Files Summary
+        print("\n### 5. Duplicate File Summary")
         if duplicates:
             print(f"  {'Size (GB)':<12} {'Duplicate File Group':<60}")
             print("  " + "-" * 80)
@@ -54,21 +77,21 @@ class ActionReporter:
             for dup in duplicates:
                 size_gb = dup["size_gb"]
                 paths = dup["paths"]
-                # Total saved is size * (count - 1)
+                owners = dup.get("owners", ["unknown"] * len(paths))
                 savings = size_gb * (len(paths) - 1)
                 total_dup_savings += savings
-                print(f"  {size_gb:<12.3f} Original: {os.path.basename(paths[0])}")
-                for p in paths[1:]:
-                    print(f"               -> Duplicate: {p}")
+                print(f"  {size_gb:<12.3f} Original: {os.path.basename(paths[0])} (Owner: {owners[0]})")
+                for p, o in zip(paths[1:], owners[1:]):
+                    print(f"               -> Duplicate: {p} (Owner: {o})")
             print(f"\n  Potential savings from duplicate removal: {total_dup_savings:.3f} GB")
         else:
             print("  No large duplicates found.")
             
-        # 5. Recommended Cleanup Actions
-        print("\n### 5. Recommended Cleanup Candidates")
+        # 6. Recommended Cleanup Actions
+        print("\n### 6. Recommended Cleanup Candidates")
         
-        auto_actions = policy_results["auto_actions"]
-        manual_actions = policy_results["manual_actions"]
+        auto_actions = policy_results.get("auto_actions", [])
+        manual_actions = policy_results.get("manual_actions", [])
         
         total_auto_gb = sum(a["size_gb"] for a in auto_actions)
         total_manual_gb = sum(m["size_gb"] for m in manual_actions)
@@ -77,7 +100,8 @@ class ActionReporter:
         print("  " + "-" * 80)
         if auto_actions:
             for action in auto_actions:
-                print(f"  - {action['description']} ({action['size_gb']:.3f} GB)")
+                risk_str = action.get("risk", "Low")
+                print(f"  - [{risk_str}] {action['description']} ({action['size_gb']:.3f} GB)")
         else:
             print("  None pending.")
             
@@ -85,7 +109,8 @@ class ActionReporter:
         print("  " + "-" * 80)
         if manual_actions:
             for action in manual_actions:
-                print(f"  - {action['description']} ({action['size_gb']:.3f} GB)")
+                risk_str = action.get("risk", "Medium")
+                print(f"  - [{risk_str}] {action['description']} ({action['size_gb']:.3f} GB)")
                 print(f"    Target: {action['target_path']}")
         else:
             print("  None pending.")
@@ -133,7 +158,8 @@ class ActionReporter:
                 "target_path": item["target_path"],
                 "size_gb": item["size_gb"],
                 "description": item["description"],
-                "approved": approved
+                "approved": approved,
+                "risk": item.get("risk", "Medium")
             })
             action_counter += 1
             

@@ -11,7 +11,7 @@ def get_connection(db_path=DEFAULT_DB_PATH):
     return conn
 
 def init_db(db_path=DEFAULT_DB_PATH):
-    """Initialize database tables if they do not exist."""
+    """Initialize database tables if they do not exist and apply schema migrations."""
     conn = get_connection(db_path)
     cursor = conn.cursor()
     
@@ -68,26 +68,48 @@ def init_db(db_path=DEFAULT_DB_PATH):
     CREATE TABLE IF NOT EXISTS pending_actions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        action_type TEXT, -- 'delete', 'compress', 'conda_clean', 'pip_clean', 'journald_clean'
+        action_type TEXT, -- 'delete', 'compress', 'conda_clean', 'pip_clean', 'journald_clean', 'delayed_delete'
         target_path TEXT,
         size_gb REAL,
         description TEXT,
         approved INTEGER DEFAULT 0, -- 0 = Pending, 1 = Approved, -1 = Rejected
         executed INTEGER DEFAULT 0, -- 0 = No, 1 = Yes
-        execution_timestamp TEXT
+        execution_timestamp TEXT,
+        risk TEXT DEFAULT 'Medium'
+    )
+    """)
+    
+    # 6. File type analytics
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS file_type_analytics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id INTEGER,
+        category TEXT,
+        size_gb REAL,
+        FOREIGN KEY(scan_id) REFERENCES system_scans(id) ON DELETE CASCADE
     )
     """)
     
     conn.commit()
+    
+    # Run migration to add 'risk' column if database already exists without it
+    try:
+        cursor.execute("ALTER TABLE pending_actions ADD COLUMN risk TEXT DEFAULT 'Medium'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        # Column already exists
+        pass
+        
     conn.close()
 
-def record_scan(db_path, system_metrics, user_metrics, directory_metrics, large_files_metrics):
+def record_scan(db_path, system_metrics, user_metrics, directory_metrics, large_files_metrics, file_type_metrics=None):
     """
     Record all metrics from a scan session in a single database transaction.
     system_metrics: dict with keys (total_size_gb, used_size_gb, free_size_gb, percent_used)
     user_metrics: list of dicts/tuples (username, used_size_gb)
     directory_metrics: list of dicts/tuples (path, size_gb, last_modified)
     large_files_metrics: list of dicts/tuples (path, size_gb, owner, last_accessed)
+    file_type_metrics: dict mapping category -> size_gb
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
@@ -126,6 +148,14 @@ def record_scan(db_path, system_metrics, user_metrics, directory_metrics, large_
             VALUES (?, ?, ?, ?, ?)
             """, (scan_id, path, size_gb, owner, last_accessed))
             
+        # Insert file type analytics
+        if file_type_metrics:
+            for category, size_gb in file_type_metrics.items():
+                cursor.execute("""
+                INSERT INTO file_type_analytics (scan_id, category, size_gb)
+                VALUES (?, ?, ?)
+                """, (scan_id, category, size_gb))
+            
         conn.commit()
         return scan_id
     except Exception as e:
@@ -134,7 +164,7 @@ def record_scan(db_path, system_metrics, user_metrics, directory_metrics, large_
     finally:
         conn.close()
 
-def add_pending_action(db_path, action_type, target_path, size_gb, description=""):
+def add_pending_action(db_path, action_type, target_path, size_gb, description="", risk="Medium"):
     """Add an action to the pending queue if it does not already exist as pending or executed."""
     conn = get_connection(db_path)
     cursor = conn.cursor()
@@ -151,9 +181,9 @@ def add_pending_action(db_path, action_type, target_path, size_gb, description="
         return row['id']
         
     cursor.execute("""
-    INSERT INTO pending_actions (action_type, target_path, size_gb, description, approved, executed)
-    VALUES (?, ?, ?, ?, 0, 0)
-    """, (action_type, target_path, size_gb, description))
+    INSERT INTO pending_actions (action_type, target_path, size_gb, description, approved, executed, risk)
+    VALUES (?, ?, ?, ?, 0, 0, ?)
+    """, (action_type, target_path, size_gb, description, risk))
     
     action_id = cursor.lastrowid
     conn.commit()
@@ -165,7 +195,7 @@ def get_pending_actions(db_path):
     conn = get_connection(db_path)
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT id, timestamp, action_type, target_path, size_gb, approved 
+    SELECT id, timestamp, action_type, target_path, size_gb, approved, risk, description
     FROM pending_actions 
     WHERE executed = 0 AND approved >= 0
     ORDER BY size_gb DESC
@@ -177,7 +207,7 @@ def get_pending_actions(db_path):
 def update_action_approval(db_path, action_id, approved):
     """Update approval status (1 = Approved, -1 = Rejected/Ignored)."""
     conn = get_connection(db_path)
-    cursor = conn.conn.cursor() if hasattr(conn, 'conn') else conn.cursor()
+    cursor = conn.cursor()
     cursor.execute("""
     UPDATE pending_actions 
     SET approved = ? 
