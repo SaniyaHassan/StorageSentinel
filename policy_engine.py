@@ -45,6 +45,23 @@ def determine_risk_score(action_type, target_path):
         
     return "Medium"
 
+def is_protected_target(target_path, protected_paths=None, protected_extensions=None):
+    """True if a target is within a protected path or has a protected (database) extension."""
+    protected_paths = protected_paths or []
+    protected_extensions = set(e.lower() for e in (protected_extensions or []))
+
+    if target_path:
+        abs_t = os.path.abspath(target_path)
+        for p in protected_paths:
+            ap = os.path.abspath(p)
+            if abs_t == ap or abs_t.startswith(ap + os.sep):
+                return True
+        _, ext = os.path.splitext(target_path.lower())
+        if ext in protected_extensions:
+            return True
+    return False
+
+
 class PolicyEngine:
     def __init__(self, config):
         self.config = config
@@ -199,6 +216,19 @@ class PolicyEngine:
                     "quota_gb": quota_gb,
                     "status": "Exceeded"
                 })
+
+        # Hard safety guarantee: never recommend acting on a protected path/extension,
+        # and never recommend a Critical-risk action. This is enforced again in the executor.
+        protected_paths = self.config.get("protected_paths", [])
+        protected_extensions = self.config.get("protected_extensions", [])
+
+        def _is_allowed(action):
+            if action.get("risk") == "Critical":
+                return False
+            return not is_protected_target(action.get("target_path"), protected_paths, protected_extensions)
+
+        auto_actions = [a for a in auto_actions if _is_allowed(a)]
+        manual_actions = [a for a in manual_actions if _is_allowed(a)]
 
         return {
             "alerts": alerts,

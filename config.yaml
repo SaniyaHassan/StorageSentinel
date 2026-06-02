@@ -46,6 +46,24 @@ exclusions:
   - "miniconda"
   - "anaconda3"
 
+# Protected paths (HARD safety guarantee).
+# StorageSentinel will NEVER compress, archive, or delete anything within these
+# paths, regardless of age, size, duplication, or risk score. Recommendations are
+# suppressed AND the executor refuses to act on them, even if approved.
+protected_paths:
+  - "/var/lib/postgresql"
+  - "/var/lib/mysql"
+  - "/etc"
+  - "/boot"
+
+# Protected file extensions (HARD safety guarantee).
+# Live databases are treated as databases, not disposable data: files with these
+# extensions are never deleted as duplicates, and the executor refuses to delete them.
+protected_extensions:
+  - ".db"
+  - ".sqlite"
+  - ".sqlite3"
+
 # User quota settings
 # Map specific users to their classes
 user_classes:

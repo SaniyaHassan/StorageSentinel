@@ -337,7 +337,13 @@ def main():
             sys.exit(0)
             
         print(f"Found {len(actions_to_run)} approved actions. Starting cleanup...")
-        results = executor.execute_actions(actions_to_run, args.db, test_mode=args.dry_run)
+        results = executor.execute_actions(
+            actions_to_run,
+            args.db,
+            test_mode=args.dry_run,
+            protected_paths=config.get("protected_paths", []),
+            protected_extensions=config.get("protected_extensions", [])
+        )
         
         # Re-run sync to update approvals & execution status in JSON
         if not args.dry_run:

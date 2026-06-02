@@ -6,7 +6,7 @@ StorageSentinel is a policy-driven, automated server storage manager designed fo
 
 ```mermaid
 graph TD
-    Scanner[scanner.py] -->|Filesystem crawling & SHA256| Sentinel[sentinel.py CLI Engine]
+    Scanner[scanner.py] -->|Filesystem crawling, analytics & duplicate detection| Sentinel[sentinel.py CLI Engine]
     Config[config.yaml] -->|Alert thresholds, quotas, & policies| Policy[policy_engine.py]
     Policy -->|Auto, manual, & risk scoring| Sentinel
     Sentinel -->|Log snapshots, file-type trends, & delayed deletes| DB[(sentinel.db SQLite)]
@@ -29,7 +29,7 @@ StorageSentinel is built around the philosophy of **Observe → Analyze → Reco
    - Archive integrity is verified by simulating decompression.
    - If verified, the original directory is renamed to `.deletable.YYYY-MM-DD` and registered as a pre-approved `delayed_delete` action.
    - The original files are kept for 7 days before being automatically purged during a subsequent `clean` run.
-5. **System Directory Exclusions**: Critical system directories (e.g. `/var/lib/postgresql`, `/var/lib/mysql`) are given a **Critical** risk score and excluded from any automatic cleanups.
+5. **Protected Paths & Databases (Hard Guarantee)**: Paths listed under `protected_paths` (e.g. `/var/lib/postgresql`, `/var/lib/mysql`, `/etc`, `/boot`) and live database files (`.db`, `.sqlite`, `.sqlite3`, via `protected_extensions`) are never compressed, archived, or deleted. Recommendations for them are suppressed by the policy engine, and the executor refuses to act on them even if they are somehow approved. Critical-risk actions are likewise never recommended.
 
 ## System Requirements
 
@@ -102,6 +102,17 @@ exclusions:
   - "node_modules"
   - "venv"
   - ".venv"
+
+# Protected paths & databases (never compressed/archived/deleted)
+protected_paths:
+  - "/var/lib/postgresql"
+  - "/var/lib/mysql"
+  - "/etc"
+  - "/boot"
+protected_extensions:
+  - ".db"
+  - ".sqlite"
+  - ".sqlite3"
 
 # User quota settings
 # Map specific users to their classes
@@ -176,7 +187,8 @@ Displays historical storage snapshot log and growth analytics:
    - **Videos**: Media files (`.mp4`, `.mkv`, etc.)
    - **ISOs**: System disk images (`.iso`, `.img`, etc.)
    - **AI Models**: Neural weights and model definitions (`.bin`, `.pt`, `.safetensors`, `.gguf`, etc.)
-   - **Datasets**: Data structures (`.csv`, `.json`, `.parquet`, `.db`, etc.)
+   - **Databases**: Live databases (`.db`, `.sqlite`, `.sqlite3`) — protected from deletion/compression.
+   - **Datasets**: Data structures (`.csv`, `.json`, `.parquet`, `.xml`, etc.)
    - **Caches**: Package manager and general cache systems.
    - **Trash**: Discarded user files.
    - **Other**: Remaining files.

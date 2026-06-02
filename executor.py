@@ -4,6 +4,23 @@ import subprocess
 from datetime import datetime
 import database
 
+def is_protected_target(target_path, protected_paths=None, protected_extensions=None):
+    """True if a target is within a protected path or has a protected (database) extension."""
+    protected_paths = protected_paths or []
+    protected_extensions = set(e.lower() for e in (protected_extensions or []))
+
+    if target_path:
+        abs_t = os.path.abspath(target_path)
+        for p in protected_paths:
+            ap = os.path.abspath(p)
+            if abs_t == ap or abs_t.startswith(ap + os.sep):
+                return True
+        _, ext = os.path.splitext(target_path.lower())
+        if ext in protected_extensions:
+            return True
+    return False
+
+
 def execute_cmd(cmd, shell=False):
     """Run a shell command and return stdout, stderr, and returncode."""
     try:
@@ -138,27 +155,39 @@ def compress_directory(dir_path, db_path, test_mode=False):
                 pass
         return f"Archive verification failed for {archive_path}. Code: {v_rcode}. Error: {v_stderr}. Kept original."
 
-def execute_actions(actions, db_path, test_mode=False):
+def execute_actions(actions, db_path, test_mode=False, protected_paths=None, protected_extensions=None):
     """
     Execute all actions in the list that have approved=True.
     Updates the database with execution status.
+
+    protected_paths / protected_extensions: hard safety guard. Even if an action was
+    somehow approved, the executor refuses to act on a protected target.
     """
     results = []
-    
+    # Destructive action types that must respect the protected-target guarantee.
+    guarded_types = {"delete", "compress", "delayed_delete", "empty_trash", "conda_clean", "pip_clean"}
+
     for action in actions:
         if not action.get("approved"):
             continue
-            
+
         action_id = action.get("id")
         action_type = action.get("action_type")
         target_path = action.get("target_path")
         size_gb = action.get("size_gb", 0)
-        
+
         print(f"Executing approved action: {action_type} on {target_path} (Estimated space: {size_gb} GB)...")
-        
+
+        # Hard guard: refuse any destructive action on a protected path/extension.
+        if action_type in guarded_types and is_protected_target(target_path, protected_paths, protected_extensions):
+            log_msg = f"REFUSED: '{target_path}' is a protected target (protected_paths/protected_extensions). No action taken."
+            print(f"Result: {log_msg}\n")
+            results.append({"action_id": action_id, "success": False, "log": log_msg})
+            continue
+
         log_msg = ""
         success = False
-        
+
         if action_type == "empty_trash":
             log_msg = clean_trash_dir(target_path, test_mode)
             success = "Error deleting" not in log_msg
