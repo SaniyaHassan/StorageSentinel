@@ -151,9 +151,11 @@ def interactive_approve(json_path, db_path):
         print("\nNo changes made.")
 
 def send_email_alert(config, disk_usage, scan_summary, policy_results):
-    """Send SMTP email alert if storage thresholds are exceeded."""
+    """Send SMTP email alert or CLI alert if storage thresholds are exceeded."""
     email_cfg = config.get("email_alerts", {})
-    if not email_cfg.get("enabled", False):
+    cli_alerts = email_cfg.get("cli_alerts", False)
+    smtp_enabled = email_cfg.get("enabled", False)
+    if not cli_alerts and not smtp_enabled:
         return
         
     percent_used = disk_usage["percent_used"]
@@ -201,21 +203,28 @@ def send_email_alert(config, disk_usage, scan_summary, policy_results):
         f"Potential Recovery: {total_recovery:.1f} GB\n\n"
         f"Please run 'sentinel.sh approve' to review and execute cleanup actions."
     )
-    
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = email_cfg.get("from_address", "sentinel@yourdomain.com")
-        msg["To"] = ", ".join(email_cfg.get("to_addresses", []))
-        
-        server = smtplib.SMTP(email_cfg.get("smtp_server", "localhost"), email_cfg.get("smtp_port", 25), timeout=10)
-        server.sendmail(msg["From"], email_cfg.get("to_addresses", []), msg.as_string())
-        server.quit()
-        print(f"Email alert sent successfully to {msg['To']}.")
-    except Exception as e:
-        print(f"Warning: Failed to send email alert: {e}")
+
+    if cli_alerts:
+        print("\n*** STORAGE SENTINEL ALERT (CLI) ***")
+        print(subject)
+        print(body)
+        print("*** END OF ALERT ***\n")
+
+    if smtp_enabled:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            msg = MIMEText(body)
+            msg["Subject"] = subject
+            msg["From"] = email_cfg.get("from_address", "sentinel@yourdomain.com")
+            msg["To"] = ", ".join(email_cfg.get("to_addresses", []))
+            
+            server = smtplib.SMTP(email_cfg.get("smtp_server", "localhost"), email_cfg.get("smtp_port", 25), timeout=10)
+            server.sendmail(msg["From"], email_cfg.get("to_addresses", []), msg.as_string())
+            server.quit()
+            print(f"Email alert sent successfully to {msg['To']}.")
+        except Exception as e:
+            print(f"Warning: Failed to send email alert: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="StorageSentinel: Storage Lifecycle Management System")

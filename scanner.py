@@ -21,13 +21,13 @@ def get_disk_usage(path):
     }
 
 def get_file_owner(uid):
-    """Retrieve username from UID, fallback to UID string on error."""
+    """Retrieve username from UID, fallback to uid:<number> on error."""
     if pwd is not None:
         try:
             return pwd.getpwuid(uid).pw_name
         except Exception:
             pass
-    return str(uid)
+    return f"uid:{uid}"
 
 def calculate_sha256_partial(file_path, bytes_to_read=1024*1024):
     """Compute SHA256 hash of the first chunk of the file for fast initial matching."""

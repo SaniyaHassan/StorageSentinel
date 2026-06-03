@@ -80,9 +80,10 @@ quotas:
 
 # SMTP email alerts configuration
 email_alerts:
-  enabled: true
+  enabled: false
+  cli_alerts: true
   smtp_server: "localhost"
   smtp_port: 25
   from_address: "sentinel@yourdomain.com"
   to_addresses:
-    - "admin@yourdomain.com"
+    - "saniyahassan26032006@gmail.com"
