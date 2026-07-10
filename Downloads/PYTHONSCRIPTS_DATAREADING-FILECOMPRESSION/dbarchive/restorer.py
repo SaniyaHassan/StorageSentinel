@@ -17,6 +17,7 @@ before insert, so a restore adapts to schema drift instead of crashing.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from . import catalog
@@ -58,6 +59,64 @@ def _load_rows(rec: ArchiveRecord) -> tuple[list[str], list[list[str]], Path]:
     return header, rows, tmp
 
 
+def _coerce_datetime(value: str) -> datetime | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _matches_created_date(row_value: str | None, created_date: str) -> bool:
+    if not created_date:
+        return True
+    if row_value is None:
+        return False
+
+    row_text = str(row_value).strip()
+    target_text = str(created_date).strip()
+    if not row_text or not target_text:
+        return False
+
+    row_dt = _coerce_datetime(row_text)
+    target_dt = _coerce_datetime(target_text)
+    if row_dt is None or target_dt is None:
+        return row_text == target_text
+
+    if len(target_text) <= 10:
+        return row_dt.date() == target_dt.date()
+    return row_dt == target_dt
+
+
+def _filter_rows_by_created_date(header: list[str], rows: list[list[str]], created_date: str | None) -> tuple[list[str], list[list[str]]]:
+    if not created_date:
+        return header, rows
+
+    try:
+        created_idx = next(i for i, name in enumerate(header) if name.lower() == "created_date")
+    except StopIteration as exc:
+        raise RestoreError(
+            "Cannot filter restore by created_date because the archive does not contain a created_date column."
+        ) from exc
+
+    filtered_rows = [
+        row for row in rows
+        if _matches_created_date(row[created_idx] if created_idx < len(row) else None, created_date)
+    ]
+    return header, filtered_rows
+
+
 def _insert_into(db: Database, table: str, target_cols: list[str], header: list[str], rows: list[list[str]]) -> int:
     keep = [i for i, name in enumerate(header) if name in set(target_cols)]
     cols = [header[i] for i in keep]
@@ -72,7 +131,7 @@ def _insert_into(db: Database, table: str, target_cols: list[str], header: list[
     return len(payload)
 
 
-def restore(db: Database, cfg: Config, batch_id: str, mode: str) -> RestoreResult:
+def restore(db: Database, cfg: Config, batch_id: str, mode: str, *, created_date: str | None = None) -> RestoreResult:
     if mode not in _MODES:
         raise RestoreError(f"Unknown restore mode {mode!r}. Use one of: {', '.join(_MODES)}.")
 
@@ -103,6 +162,7 @@ def restore(db: Database, cfg: Config, batch_id: str, mode: str) -> RestoreResul
                              detail=f"Wrote {out}")
 
     header, rows, tmp = _load_rows(rec)
+    header, rows = _filter_rows_by_created_date(header, rows, created_date)
     try:
         if mode == "temp-table":
             source = describe_table(db, rec.source_table)
@@ -119,8 +179,11 @@ def restore(db: Database, cfg: Config, batch_id: str, mode: str) -> RestoreResul
             db.commit()
             catalog.update_status(db, cfg, batch_id, "RESTORED",
                                   notes=f"Restored to {temp_table} at {now_iso()}")
+            detail = f"Loaded {inserted} rows into {temp_table}."
+            if created_date:
+                detail += f" (filtered to created_date={created_date})"
             return RestoreResult(mode=mode, status="restored", rows=inserted,
-                                 detail=f"Loaded {inserted} rows into {temp_table}.")
+                                 detail=detail)
 
         # mode == "database"
         source = describe_table(db, rec.source_table)
@@ -128,7 +191,10 @@ def restore(db: Database, cfg: Config, batch_id: str, mode: str) -> RestoreResul
         db.commit()
         catalog.update_status(db, cfg, batch_id, "RESTORED",
                               notes=f"Restored into source at {now_iso()}")
+        detail = f"Loaded {inserted} rows into {rec.source_table}."
+        if created_date:
+            detail += f" (filtered to created_date={created_date})"
         return RestoreResult(mode=mode, status="restored", rows=inserted,
-                             detail=f"Loaded {inserted} rows into {rec.source_table}.")
+                             detail=detail)
     finally:
         tmp.unlink(missing_ok=True)

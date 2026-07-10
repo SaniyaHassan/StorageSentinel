@@ -141,7 +141,8 @@ class CliApp:
     def restore_workflow(self) -> None:
         batch_id = input("Enter archive batch id: ").strip()
         mode = input("Restore mode [verify/csv/temp-table/database]: ").strip() or "verify"
-        result = restore(self.db, self.cfg, batch_id, mode)
+        created_date = input("Enter created date to restore (leave blank for all rows): ").strip()
+        result = restore(self.db, self.cfg, batch_id, mode, created_date=created_date or None)
         print(f"[{result.status}] {result.detail}")
 
     def show_configuration(self) -> None:

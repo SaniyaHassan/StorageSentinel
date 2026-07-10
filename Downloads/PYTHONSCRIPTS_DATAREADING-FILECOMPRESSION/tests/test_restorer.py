@@ -44,6 +44,23 @@ def test_database_mode_restores_count(demo_db, demo_cfg):
     assert _count(demo_db) == before
 
 
+def test_database_mode_can_restore_rows_for_matching_created_date(demo_db, demo_cfg):
+    target_date = demo_db.query("SELECT created_date FROM patients ORDER BY created_date LIMIT 1")[0]["created_date"]
+    expected_matches = demo_db.query(
+        "SELECT COUNT(*) AS c FROM patients WHERE created_date = ?",
+        (target_date,),
+    )[0]["c"]
+
+    rec = _archive(demo_db, demo_cfg)
+    result = restore(demo_db, demo_cfg, rec.batch_id, "database", created_date=target_date)
+
+    assert result.rows == expected_matches
+    assert demo_db.query(
+        "SELECT COUNT(*) AS c FROM patients WHERE created_date = ?",
+        (target_date,),
+    )[0]["c"] == expected_matches
+
+
 def test_corrupted_archive_raises(demo_db, demo_cfg):
     rec = _archive(demo_db, demo_cfg)
     # Corrupt the gz payload so the checksum no longer matches.
