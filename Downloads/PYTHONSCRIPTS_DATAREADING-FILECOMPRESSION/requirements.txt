@@ -1,0 +1,7 @@
+# Core runtime dependency (SQL Server backend). The offline SQLite demo backend
+# and the full test suite need nothing beyond the Python standard library, so
+# they run even if this driver is not installed.
+pyodbc>=5.0.0
+
+# Test framework.
+pytest>=8.0.0

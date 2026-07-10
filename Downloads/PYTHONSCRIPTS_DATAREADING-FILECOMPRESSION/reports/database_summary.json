@@ -1,0 +1,16 @@
+{
+  "database_name": "sqlite",
+  "database_size_bytes": 0,
+  "table_count": 2,
+  "view_count": 0,
+  "proc_count": 0,
+  "index_count": 0,
+  "total_rows": 480,
+  "largest_table": "patients",
+  "largest_table_rows": 240,
+  "smallest_table": "patients",
+  "smallest_table_rows": 240,
+  "creation_date": "N/A",
+  "compatibility_level": "N/A",
+  "recovery_model": "N/A"
+}

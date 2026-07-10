@@ -1,0 +1,23 @@
+{
+  "backend": "sqlserver",
+  "driver": "ODBC Driver 18 for SQL Server",
+  "server": "localhost,1433",
+  "database": "ArchiveTest",
+  "user": "sa",
+  "password": "Database123!",
+
+  "archive_location": "archives",
+  "exports_location": "exports",
+  "reports_location": "reports",
+
+  "archive_history_table": "ArchiveHistory",
+  "catalog_table": "ArchiveCatalog",
+  "compression_logs_table": "CompressionLogs",
+
+  "compression_type": "gzip",
+  "export_format": "csv",
+
+  "default_threshold_days": 30,
+  "log_dir": "logs",
+  "dry_run": false
+}
