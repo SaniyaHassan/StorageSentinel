@@ -1,161 +1,149 @@
-# Database Archival & Compression CLI
+# StorageSentinel - Storage Lifecycle Manager
 
-A single interactive CLI menu application for database archival, export, compression, cataloging, and restore. The tool runs with a SQLite demo backend by default and can target Microsoft SQL Server using the `sqlserver` backend.
+StorageSentinel is a shell-first storage manager for Linux servers. It scans file system usage, classifies large and obsolete data, detects duplicate content, and produces safe cleanup recommendations. The system is designed to preserve protected paths and only execute approved cleanup actions.
 
-The application is fully automatic: it discovers every archivable table and its best timestamp column itself. There is no "source table" to configure — you point it at a database and it figures out what to archive.
+## Architecture
 
-## What the program does
+- `sentinel.sh` — primary shell scanner and cleanup workflow
+- `config.conf` — scan thresholds, protected paths, quotas, and email settings
+- `pending_actions.csv` — generated recommendation queue for review and execution
+- `server_health.sh` — collects server health metrics into `server_health.db`
+- `server_report.sh` — generates server health reports from SQLite data
+- `legacy_python/` — legacy Python reference code; not required for shell-only operation
 
-This CLI app provides:
+## What’s Final
 
-- database summary and detailed schema reports
-- automatic archival-candidate analysis across every table in the database, based on detected timestamp columns
-- export of rows older than a threshold, for every eligible table in one run
-- compression of exported data into `.gz` archive files
-- recording archive history, archive catalog, and compression-log metadata
-- optional deletion of source rows after archiving
-- restoration of archived batches
+This repository is finalized around shell automation. The core workflow is implemented in bash, and Python is no longer required for the scanner/report flow.
 
-## Project structure
+## Requirements
 
-- `app.py` – interactive CLI entry point
-- `dbarchive/` – library package with config, database backends, inspection, analysis, archiving, cataloging, and restore logic
-- `sample_config.json` – starter configuration for the demo (SQLite) backend
-- `sqlserver_config.json` – starter configuration for the SQL Server backend (e.g. the `ArchiveTest` database)
-- `tests/` – pytest regression tests
+- Linux with `bash`
+- `find`, `du`, `stat`, `df`, `awk`, `sed`, `ps`
+- `sqlite3` for server health reporting
+- `mail` or `mailx` if email alerting is enabled
 
-## Quick start
+## Setup
 
-1. Create and activate a virtual environment.
-2. Install dependencies:
+1. Make the shell scripts executable:
+   ```bash
+   chmod +x sentinel.sh server_health.sh server_report.sh
+   ```
 
-```bash
-pip install -r requirements.txt
-```
+2. Review and customize `config.conf`.
 
-3. Run the interactive CLI menu:
+## Usage
 
-```bash
-python app.py --config sample_config.json
-```
+StorageSentinel has two independent workflows: a read-only **report** for visibility, and a **scan → approve → clean** cycle for actually reclaiming space.
 
-If you want to use the demo backend explicitly:
+### Storage Report (read-only)
 
 ```bash
-python app.py --backend demo --config sample_config.json
+./sentinel.sh report [root]
 ```
+- Prints a live system health snapshot (CPU, load, RAM, swap, uptime) plus a detailed storage report: disk utilization, per-user usage vs. quota, file type breakdown, large files, and duplicate file groups.
+- Does **not** write `pending_actions.csv` or `history.log` — safe to run anytime, as often as you like, with no side effects.
 
-From the menu you can:
+### Scan & Cleanup Workflow
 
-- view a database summary report
-- view a detailed database report
-- analyze every table for archival suitability
-- run an export/archive cycle across every eligible table
-- review archive history
-- restore archived data
-- inspect the active configuration
-
-## How table and column discovery works
-
-Choosing menu option `3` ("Analyze Database for Archival") scans every table in the connected database and, for each one:
-
-- inspects its columns and picks the best timestamp/date column using a scoring model (lifecycle columns like `CreatedDate` beat modification columns like `UpdatedDate`, which beat generic date columns, which beat pure business dates like `DueDate` or `ExpiryDate`)
-- skips tables with no usable timestamp column
-- skips empty tables
-- skips the application's own audit tables (`archive_history_table`, `catalog_table`, `compression_logs_table` from config) so the app never tries to archive its own history
-
-Choosing menu option `4` ("Export and Archive Database") reuses this exact same analysis, then loops over every eligible table it finds:
-
+```bash
+./sentinel.sh scan [root]
 ```
-Processed 15 tables
+- Scans the filesystem and generates cleanup recommendations (trash, package caches, journald logs, duplicate files, cold directories).
+- Prints a cleanup-candidates summary.
+- Writes `pending_actions.csv` with the proposed actions and logs the run to `history.log`.
 
-Archived:
-Customers
-Orders
-AuditLogs
-Documents
-SensorData
-
-Skipped:
-ArchiveHistory (empty)
-SystemSettings (no timestamp)
-Categories (no rows older than threshold)
-
-Failed:
-none
+```bash
+./sentinel.sh approve
 ```
+- Review and approve or reject recommended actions interactively.
 
-If a table fails partway through (e.g. a locked table, a transient connection error), that failure is recorded and the run continues with the remaining tables — one bad table never stops the whole archive run.
+```bash
+./sentinel.sh clean
+```
+- Executes approved cleanup actions.
 
-## Option 4 behavior
+```bash
+./sentinel.sh history
+```
+- Displays scan history.
 
-When you choose `4`, the CLI asks:
+### Server Health Monitoring
 
-- `Enter archive threshold in days:` (applied to every table in this run)
-- `Delete source rows after archive? [Y/n]:` (applied to every table in this run)
+```bash
+./server_health.sh init
+```
+- Initialize the server health database.
 
-If you answer `n` or `no`, each table's archive keeps the original rows in that source table.
+```bash
+./server_health.sh collect
+```
+- Capture one server health sample.
+
+```bash
+./server_report.sh daily|weekly|monthly
+```
+- Generate a server health report from stored samples.
 
 ## Configuration
 
-The configuration file contains **only connection settings and global settings** — there is no table name or column name in it anywhere:
+Edit `config.conf` to tune scanner behavior and alerts.
 
-```json
-{
-  "backend": "sqlserver",
-  "driver": "ODBC Driver 18 for SQL Server",
-  "server": "localhost,1433",
-  "database": "ArchiveTest",
-  "user": "sa",
-  "password": "Database123!",
-
-  "archive_location": "archives",
-  "exports_location": "exports",
-  "reports_location": "reports",
-
-  "archive_history_table": "ArchiveHistory",
-  "catalog_table": "ArchiveCatalog",
-  "compression_logs_table": "CompressionLogs",
-
-  "compression_type": "gzip",
-  "export_format": "csv",
-
-  "default_threshold_days": 30,
-  "log_dir": "logs",
-  "dry_run": false
-}
-```
-
-Key fields:
-
-- `backend`: `demo` (SQLite) or `sqlserver`
-- `driver` / `server` / `database` / `user` / `password`: SQL Server connection details (ignored for the demo backend)
-- `archive_location` / `exports_location` / `reports_location` / `log_dir`: output directories
-- `archive_history_table` / `catalog_table` / `compression_logs_table`: names of the three audit tables the app creates and writes to on the target database — also the tables the analyzer always excludes from archival
-- `default_threshold_days`: the value pre-filled at the "Enter archive threshold in days" prompt
-- `dry_run`: when true, the archive workflow reports what it would do without writing anything
-
-This file is used with the SQL Server `ArchiveTest` database:
+Example settings:
 
 ```bash
-python app.py --config sqlserver_config.json
+SCAN_ROOT="/home"
+ALERT_WARNING_PCT=80
+ALERT_CRITICAL_PCT=90
+ALERT_EMERGENCY_PCT=95
+LARGE_FILE_GB=5
+MIN_DIR_SIZE_GB=1
+TRASH_MAX_AGE_DAYS=30
+CLEAN_CONDA_CACHE=1
+CLEAN_PIP_CACHE=1
+CLEAN_JOURNALD_LOGS=1
+JOURNALD_MAX_AGE_DAYS=30
+DUPLICATE_MIN_SIZE_MB=50
+COLD_DATA_DAYS=180
+DEFAULT_QUOTA_GB=150.0
+
+PROTECTED_PATHS=("/var/lib/postgresql" "/var/lib/mysql" "/etc" "/boot")
+PROTECTED_EXTENSIONS=(".db" ".sqlite" ".sqlite3")
+
+ENABLE_EMAIL=0
+MAIL_CMD="mail"
+SMTP_SERVER="localhost"
+SMTP_PORT=25
+FROM_ADDRESS="sentinel@yourdomain.com"
+TO_ADDRESSES=("admin@yourdomain.com")
+
+SERVER_HEALTH_DB="server_health.db"
+SERVER_HEALTH_ROOT="/"
 ```
 
-## Testing
+## Report Sections
 
-Run the test suite with:
+`./sentinel.sh report` prints:
 
-```bash
-python -m pytest tests -q
+1. **System Health Snapshot** — live CPU usage, load average, RAM/swap usage, and uptime (read directly from `/proc`, no database required)
+2. **Filesystem Utilization** — disk usage, available space, and alert status
+3. **User Storage & Quotas** — user usage versus quota and status
+4. **File Type Analytics** — category sizes for trash, caches, videos, ISOs, AI models, databases, datasets, and other files
+5. **Large Files** (above `LARGE_FILE_GB`) — top large files by owner and path
+6. **Duplicate File Summary** — duplicate sets and potential savings
+
+`./sentinel.sh scan` prints a separate **Cleanup Candidates** summary (auto-clean and manual-approval actions) and writes them to `pending_actions.csv`.
+
+## Final Notes
+
+- `sentinel.sh` is the finalized shell-based scanner.
+- `legacy_python/` remains for reference only.
+- The shell workflow is complete and validated.
+
+## Automation Example
+
+Example cron entries:
+
+```cron
+0 2 * * * cd /path/to/StorageSentinel && ./sentinel.sh scan >> /var/log/sentinel_scan.log 2>&1
+0 3 * * * cd /path/to/StorageSentinel && ./sentinel.sh clean --auto-only >> /var/log/sentinel_clean.log 2>&1
 ```
-
-## Notes
-
-- This project is currently a CLI-only application; there is no web server component.
-- `sample_config.json` and `sqlserver_config.json` are starting points, not production configurations — replace the credentials before real use.
-- The SQL Server backend requires `pyodbc` and the appropriate ODBC driver.
-- Each table's archive operation is transactional: if anything fails for that table, the rollback preserves that table's source data. A failure on one table does not affect any other table in the same run.
-- The archive table name recorded per batch is `<table>_archive`, created by mirroring the source table's columns.
-- Export files are written atomically using a temporary file + rename pattern.
-- Do not modify binaries, deployment files, or existing application logs.
-- The service is intentionally isolated in this project folder and uses only the configured export/archive directories.
