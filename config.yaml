@@ -1,0 +1,117 @@
+# StorageSentinel configuration
+
+server:
+  scan_root: "/"
+
+  # Filesystems that must never be recursively scanned.
+  excluded_filesystems:
+    - proc
+    - sysfs
+    - devtmpfs
+    - devpts
+    - tmpfs
+    - cgroup
+    - cgroup2
+    - securityfs
+    - pstore
+    - bpf
+    - autofs
+    - hugetlbfs
+    - mqueue
+    - debugfs
+    - tracefs
+    - fusectl
+    - configfs
+    - ramfs
+    - overlay
+
+  # Virtual/transient paths.
+  excluded_paths:
+    - "/proc"
+    - "/sys"
+    - "/dev"
+    - "/run"
+    - "/snap"
+
+  # Never delete anything under these paths.
+  protected_paths:
+    - "/etc"
+    - "/boot"
+    - "/var/opt/mssql"
+    - "/var/lib/postgresql"
+    - "/var/lib/mysql"
+    - "/var/lib/docker"
+    - "/var/lib/containerd"
+
+report:
+  largest_files: 20
+  largest_folders: 20
+
+  # Maximum depth for the fast folder report.
+  folder_depth: 2
+
+  # Don't report files smaller than this.
+  minimum_file_size_mb: 1
+
+scan:
+  # Duplicate detection
+  find_duplicates: true
+  duplicate_min_size_mb: 10
+
+  # Trash
+  find_trash: true
+
+  # Common caches
+  find_caches: true
+
+  # Temporary files
+  find_temp_files: true
+
+  # Old log files
+  find_old_logs: true
+  old_log_days: 30
+
+  # Files/directories older than this can be reported as candidates.
+  # Disabled by default because this can produce many candidates.
+  find_cold_data: false
+  cold_data_days: 180
+
+  # Never scan files larger than this for duplicate hashing.
+  # Set to 0 for unlimited.
+  max_duplicate_file_gb: 0
+
+  # Number of bytes used for the first-stage duplicate hash.
+  partial_hash_bytes: 1048576
+
+cleanup:
+  # Trash is low risk.
+  allow_trash: true
+
+  # Cache cleanup is considered low/medium risk.
+  allow_caches: true
+
+  # Temporary files.
+  allow_temp_files: true
+
+  # Old logs.
+  allow_old_logs: true
+
+  # Duplicates require explicit approval.
+  allow_duplicates: true
+
+  # Never automatically delete these extensions.
+  protected_extensions:
+    - ".db"
+    - ".sqlite"
+    - ".sqlite3"
+    - ".mdf"
+    - ".ndf"
+    - ".ldf"
+    - ".bak"
+    - ".sql"
+
+logging:
+  history_file: "history.log"
+  report_file: "storage_report.txt"
+  pending_file: "pending_actions.csv"
+  log_file: "sentinel.log"
