@@ -1,6 +1,6 @@
 # StorageSentinel
 
-## What this does (in simple terms)
+## What this does
 
 StorageSentinel is a command-line Python tool for keeping a Linux server's disk usage under control. It looks at your system's health (CPU, RAM, swap, uptime), tells you which mounted filesystems, top-level folders, and individual files are using the most space, and then — only in a separate, explicit step — goes looking for specific things that are usually safe to delete: files sitting in Trash directories, cache folders, temporary files, old log files, and exact duplicate files. It never deletes anything by itself. Every single candidate it finds has to be reviewed and approved **one at a time** by a human before anything is removed, and certain paths and file extensions (databases, `/etc`, `/boot`, Docker/Postgres/MySQL/SQL Server data, `.bak`/`.sql` files, etc.) can never be deleted no matter what.
 
